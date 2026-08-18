@@ -1,1 +1,0 @@
-/usr/bin/c++  -O3 -march=native -Wall -Wextra -O3 -DNDEBUG CMakeFiles/kvstore_test.dir/tests/KVStoreTest.cpp.o CMakeFiles/kvstore_test.dir/src/KVStore.cpp.o -o kvstore_test 
