@@ -1,0 +1,4 @@
+/mnt/c/Users/srays/voltkv/build/CMakeFiles/kvstore.dir
+/mnt/c/Users/srays/voltkv/build/CMakeFiles/kvstore_test.dir
+/mnt/c/Users/srays/voltkv/build/CMakeFiles/edit_cache.dir
+/mnt/c/Users/srays/voltkv/build/CMakeFiles/rebuild_cache.dir
