@@ -12,6 +12,7 @@ private:
     KVStore& store;
 
     bool sendResponse(int, const std::string&);
+    void handleClient(int);
 public:
     Server(int, KVStore&);
     void start();

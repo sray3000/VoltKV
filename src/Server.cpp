@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -40,15 +41,40 @@ void Server::start() {
 
     std::cout << "Listening on port " << port << "...\n";
 
-    int client_fd = accept(server_fd, nullptr, nullptr);
-    if(client_fd == -1) {
-        perror("accept");
-        close(server_fd);
-        return;
+    while(1) {
+        int client_fd = accept(server_fd, nullptr, nullptr);
+        if(client_fd == -1) {
+            perror("accept");
+            continue;
+        }
+
+        std::cout << "Connected to client...\n";
+
+        std::thread client_thread(&Server::handleClient, this, client_fd);
+        client_thread.detach();
     }
 
-    std::cout << "Connected to client...\n";
+    close(server_fd);
+}
 
+bool Server::sendResponse(int client_fd, const std::string& response) {
+    size_t total_sent = 0;
+
+    while(total_sent < response.size()) {
+        ssize_t bytes_sent = send(client_fd, response.data() + total_sent, response.size() - total_sent, 0);
+
+        if(bytes_sent <= 0) {
+            perror("send");
+            return false;
+        }
+
+        total_sent += bytes_sent;
+    }
+
+    return true;
+}
+
+void Server::handleClient(int client_fd) {
     std::string recv_buffer;
 
     while(1) {
@@ -58,14 +84,12 @@ void Server::start() {
         if (bytes_recd == 0) {
             std::cout << "Client disconnected.\n";
             close(client_fd);
-            close(server_fd);
             return;
         }
 
         if(bytes_recd < 0) {
             perror("recv");
             close(client_fd);
-            close(server_fd);
             return;
         }
 
@@ -97,7 +121,6 @@ void Server::start() {
             if(!valid) {
                 if(!sendResponse(client_fd, "ERROR invalid command\n")) {
                     close(client_fd);
-                    close(server_fd);
                     return;
                 }
                 continue;
@@ -113,7 +136,6 @@ void Server::start() {
 
                 if(!sendResponse(client_fd, "OK\n")) {
                     close(client_fd);
-                    close(server_fd);
                     return;
                 }
             } else if(cmd == "GET") {
@@ -124,7 +146,6 @@ void Server::start() {
                 std::string message = value ? (*value + "\n") : "NOT_FOUND\n";
                 if(!sendResponse(client_fd, message)) {
                     close(client_fd);
-                    close(server_fd);
                     return;
                 }
             } else if(cmd == "DELETE") {
@@ -135,7 +156,6 @@ void Server::start() {
                 std::string message = status ? "1\n" : "0\n";
                 if(!sendResponse(client_fd, message)) {
                     close(client_fd);
-                    close(server_fd);
                     return;
                 }
             } else if(cmd == "EXISTS") {
@@ -146,29 +166,11 @@ void Server::start() {
                 std::string message = status ? "1\n" : "0\n";
                 if(!sendResponse(client_fd, message)) {
                     close(client_fd);
-                    close(server_fd);
                     return;
                 }
             }
         }
     }
+
     close(client_fd);
-    close(server_fd);
-}
-
-bool Server::sendResponse(int client_fd, const std::string& response) {
-    size_t total_sent = 0;
-
-    while(total_sent < response.size()) {
-        ssize_t bytes_sent = send(client_fd, response.data() + total_sent, response.size() - total_sent, 0);
-
-        if(bytes_sent <= 0) {
-            perror("send");
-            return false;
-        }
-
-        total_sent += bytes_sent;
-    }
-
-    return true;
 }
