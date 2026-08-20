@@ -60,6 +60,10 @@ add_executable(threadpool_concurrency_test
 add_executable(kvstore_lock_benchmark
     benchmarks/KVStoreLockBenchmark.cpp
 )
+add_executable(
+    kvstore_server_benchmark
+    benchmarks/ServerBenchmark.cpp
+)
 
 find_package(Threads REQUIRED)
 
