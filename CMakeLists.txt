@@ -25,6 +25,11 @@ add_executable(kvstore_test
     tests/KVStoreTest.cpp
     src/KVstore.cpp
 )
+add_executable(
+    kvstore_ttl_test
+    tests/KVStoreTTLTest.cpp
+    src/KVStore.cpp
+)
 
 # Concurrency tests
 add_executable(kvstore_conc_test

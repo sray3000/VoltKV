@@ -3,6 +3,7 @@
 #include <string>
 #include <thread>
 #include <cerrno>
+#include <chrono>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -261,10 +262,10 @@ void Server::processCommand(int client_fd, const std::string& command, std::shar
 
     bool valid = true;
 
-    if(tokens.size() < 1 || tokens.size() > 3) {
+    if(tokens.size() < 1 || tokens.size() > 4) {
         valid = false;
     } else if(tokens[0] == "SET") {
-        valid = (tokens.size() == 3);
+        valid = (tokens.size() == 3 || tokens.size() == 4);
     } else if(tokens[0] == "GET" || tokens[0] == "DELETE" || tokens[0] == "EXISTS") {
         valid = (tokens.size() == 2);
     } else {
@@ -283,12 +284,38 @@ void Server::processCommand(int client_fd, const std::string& command, std::shar
     std::string cmd = tokens[0];
 
     if(cmd == "SET") {
-        store.set(tokens[1], tokens[2]);
+        std::string key = tokens[1];
+        std::string value = tokens[2];
+
+        if(tokens.size() == 3)
+          store.set(key, value);
+        else {
+            try {
+                long long ttl = std::stoll(tokens[3]);
+
+                if(ttl <= 0) {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    if(!state->active)
+                        return;
+                    sendResponse(client_fd, "ERROR invalid TTL\n");
+                    return;
+                }
+
+                store.set(key, value, std::chrono::seconds(ttl));
+            } catch(...) {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if(!state->active)
+                    return;
+
+                sendResponse(client_fd, "ERROR invalid TTL\n");
+                return;
+            }
+        }
 
         std::lock_guard<std::mutex> lock(state->mutex);
-
         if(!state->active)
             return;
+
         sendResponse(client_fd, "OK\n");
     } else if(cmd == "GET") {
         auto value = store.get(tokens[1]);
