@@ -17,6 +17,7 @@ add_executable(kvstore
     src/CmdParser.cpp
     src/Server.cpp
     src/KVstore.cpp
+    src/ThreadPool.cpp
 )
 
 # Unit tests
@@ -35,6 +36,16 @@ add_executable(kvstore_mixed_conc_test
     src/KVStore.cpp
 )
 
+# ThreadPool tests
+add_executable(threadpool_test
+    tests/ThreadPoolTest.cpp
+    src/ThreadPool.cpp
+)
+add_executable(threadpool_concurrency_test
+    tests/ThreadPoolConcurrencyTest.cpp
+    src/ThreadPool.cpp
+)
+
 # Benchmarks
 add_executable(kvstore_lock_benchmark
     benchmarks/KVStoreLockBenchmark.cpp
@@ -49,5 +60,11 @@ target_link_libraries(kvstore_mixed_conc_test
     Threads::Threads
 )
 target_link_libraries(kvstore_lock_benchmark
+    Threads::Threads
+)
+target_link_libraries(threadpool_test
+    Threads::Threads
+)
+target_link_libraries(threadpool_concurrency_test
     Threads::Threads
 )

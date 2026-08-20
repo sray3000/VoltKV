@@ -7,7 +7,7 @@
 int main() {
     KVStore store;
 
-    Server server(PORT, store);
+    Server server(PORT, store, NUM_THREADS);
     server.start();
 
     return 0;

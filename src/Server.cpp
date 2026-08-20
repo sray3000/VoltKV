@@ -2,15 +2,18 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <cerrno>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/epoll.h>
 #include "Server.h"
 #include "CmdParser.h"
 
-Server::Server(int port, KVStore& store)
-    : port(port), server_fd(-1), store(store) {
+Server::Server(int port, KVStore& store, size_t num_threads)
+    : port(port), server_fd(-1), epoll_fd(-1), store(store), pool(num_threads) {
 }
 
 void Server::start() {
@@ -18,6 +21,20 @@ void Server::start() {
 
     if(server_fd == -1) {
         perror("socket");
+        return;
+    }
+
+    int flags = fcntl(server_fd, F_GETFL, 0);
+
+    if(flags == -1) {
+        perror("fcntl");
+        close(server_fd);
+        return;
+    }
+
+    if(fcntl(server_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl");
+        close(server_fd);
         return;
     }
 
@@ -41,19 +58,118 @@ void Server::start() {
 
     std::cout << "Listening on port " << port << "...\n";
 
-    while(1) {
-        int client_fd = accept(server_fd, nullptr, nullptr);
-        if(client_fd == -1) {
-            perror("accept");
-            continue;
-        }
+    epoll_fd = epoll_create1(0);
 
-        std::cout << "Connected to client...\n";
-
-        std::thread client_thread(&Server::handleClient, this, client_fd);
-        client_thread.detach();
+    if(epoll_fd == -1) {
+        perror("epoll_create1");
+        close(server_fd);
+        return;
     }
 
+    epoll_event event{};
+
+    event.events = EPOLLIN;
+    event.data.fd = server_fd;
+
+    if(epoll_ctl(
+            epoll_fd,
+            EPOLL_CTL_ADD,
+            server_fd,
+            &event
+        ) == -1) {
+
+        perror("epoll_ctl");
+        close(epoll_fd);
+        close(server_fd);
+        return;
+    }
+
+    constexpr int MAX_EVENTS = 64;
+    epoll_event events[MAX_EVENTS];
+
+    while(true) {
+
+        int ready = epoll_wait(
+            epoll_fd,
+            events,
+            MAX_EVENTS,
+            -1
+        );
+
+        if(ready == -1) {
+            perror("epoll_wait");
+            break;
+        }
+
+        for(int i = 0; i < ready; i++) {
+            int fd = events[i].data.fd;
+
+            if(fd != server_fd &&
+            (events[i].events & (EPOLLERR | EPOLLHUP))) {
+
+                std::cout << "Client error/disconnected: "
+                        << fd << "\n";
+
+                epoll_ctl(
+                    epoll_fd,
+                    EPOLL_CTL_DEL,
+                    fd,
+                    nullptr
+                );
+
+                clients.erase(fd);
+                close(fd);
+
+                continue;
+            }
+
+            if(fd == server_fd) {
+                int client_fd = accept(server_fd, nullptr, nullptr);
+                if(client_fd == -1) {
+                    perror("accept");
+                    continue;
+                }
+
+                std::cout << "Client connected: " << client_fd << "\n";
+
+                int flags = fcntl(client_fd, F_GETFL, 0);
+
+                if(flags == -1) {
+                    perror("fcntl");
+                    close(client_fd);
+                    continue;
+                }
+
+                if(fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+                    perror("fcntl");
+                    close(client_fd);
+                    continue;
+                }
+
+                epoll_event client_event{};
+
+                client_event.events = EPOLLIN;
+                client_event.data.fd = client_fd;
+
+                if(epoll_ctl(
+                        epoll_fd,
+                        EPOLL_CTL_ADD,
+                        client_fd,
+                        &client_event
+                    ) == -1) {
+
+                    perror("epoll_ctl");
+                    close(client_fd);
+                    continue;
+                }
+                clients.emplace(client_fd, std::make_shared<ClientState>());
+            } else {
+                handleClient(fd);
+            }
+        }
+    }
+
+    close(epoll_fd);
     close(server_fd);
 }
 
@@ -75,102 +191,158 @@ bool Server::sendResponse(int client_fd, const std::string& response) {
 }
 
 void Server::handleClient(int client_fd) {
-    std::string recv_buffer;
+    auto it = clients.find(client_fd);
 
-    while(1) {
-        char buffer[1024];
-        ssize_t bytes_recd = recv(client_fd, buffer, sizeof(buffer), 0);
+    if(it == clients.end())
+        return;
 
-        if (bytes_recd == 0) {
-            std::cout << "Client disconnected.\n";
-            close(client_fd);
-            return;
+    std::shared_ptr<ClientState> state = it->second;
+
+    char buffer[1024];
+
+    ssize_t bytes_recd = recv(client_fd, buffer, sizeof(buffer), 0);
+
+    if(bytes_recd == 0) {
+        std::cout << "Client disconnected: " << client_fd << "\n";
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->active = false;
+            state->commands.clear();
         }
 
-        if(bytes_recd < 0) {
-            perror("recv");
-            close(client_fd);
-            return;
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
+
+        clients.erase(client_fd);
+        close(client_fd);
+        return;
+    }
+
+    if(bytes_recd < 0) {
+        if(errno == EAGAIN || errno == EWOULDBLOCK)
+          return;
+        perror("recv");
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->active = false;
+            state->commands.clear();
         }
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
+        clients.erase(client_fd);
+        close(client_fd);
+        return;
+    }
 
-        recv_buffer.append(buffer, bytes_recd);
+    state->recv_buffer.append(buffer, bytes_recd);
 
-        size_t pos;
+    std::string& recv_buffer = state->recv_buffer;
+
+    size_t pos;
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
 
         while((pos = recv_buffer.find('\n')) != std::string::npos) {
             std::string command = recv_buffer.substr(0, pos);
+
             recv_buffer.erase(0, pos + 1);
 
-            Parser parser(command);
-            std::vector<std::string> tokens;
-
-            tokens = parser.parse();
-
-            bool valid = true;
-
-            if(tokens.size() < 1 || tokens.size() > 3) {
-                valid = false;
-            } else if(tokens[0] == "SET") {
-                valid = (tokens.size() == 3);
-            } else if(tokens[0] == "GET" || tokens[0] == "DELETE" || tokens[0] == "EXISTS") {
-                valid = (tokens.size() == 2);
-            } else {
-                valid = false;
-            }
-
-            if(!valid) {
-                if(!sendResponse(client_fd, "ERROR invalid command\n")) {
-                    close(client_fd);
-                    return;
-                }
-                continue;
-            }
-
-            std::string cmd = tokens[0];
-
-            if(cmd == "SET") {
-                std::string key = tokens[1];
-                std::string value = tokens[2];
-
-                store.set(key, value);
-
-                if(!sendResponse(client_fd, "OK\n")) {
-                    close(client_fd);
-                    return;
-                }
-            } else if(cmd == "GET") {
-                std::string key = tokens[1];
-
-                auto value = store.get(key);
-
-                std::string message = value ? (*value + "\n") : "NOT_FOUND\n";
-                if(!sendResponse(client_fd, message)) {
-                    close(client_fd);
-                    return;
-                }
-            } else if(cmd == "DELETE") {
-                std::string key = tokens[1];
-
-                auto status = store.erase(key);
-
-                std::string message = status ? "1\n" : "0\n";
-                if(!sendResponse(client_fd, message)) {
-                    close(client_fd);
-                    return;
-                }
-            } else if(cmd == "EXISTS") {
-                std::string key = tokens[1];
-
-                auto status = store.exists(key);
-
-                std::string message = status ? "1\n" : "0\n";
-                if(!sendResponse(client_fd, message)) {
-                    close(client_fd);
-                    return;
-                }
+            if(!command.empty()) {
+                state->commands.push_back(command);
             }
         }
     }
+    processNextCommand(client_fd, state);
+}
 
-    close(client_fd);
+void Server::processCommand(int client_fd, const std::string& command, std::shared_ptr<ClientState> state) {
+    Parser parser(command);
+
+    std::vector<std::string> tokens = parser.parse();
+
+    bool valid = true;
+
+    if(tokens.size() < 1 || tokens.size() > 3) {
+        valid = false;
+    } else if(tokens[0] == "SET") {
+        valid = (tokens.size() == 3);
+    } else if(tokens[0] == "GET" || tokens[0] == "DELETE" || tokens[0] == "EXISTS") {
+        valid = (tokens.size() == 2);
+    } else {
+        valid = false;
+    }
+
+    if(!valid) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+
+        if(!state->active)
+            return;
+        sendResponse(client_fd, "ERROR invalid command\n");
+        return;
+    }
+
+    std::string cmd = tokens[0];
+
+    if(cmd == "SET") {
+        store.set(tokens[1], tokens[2]);
+
+        std::lock_guard<std::mutex> lock(state->mutex);
+
+        if(!state->active)
+            return;
+        sendResponse(client_fd, "OK\n");
+    } else if(cmd == "GET") {
+        auto value = store.get(tokens[1]);
+
+        std::string message = value ? (*value + "\n") : "NOT_FOUND\n";
+
+        std::lock_guard<std::mutex> lock(state->mutex);
+
+        if(!state->active)
+            return;
+        sendResponse(client_fd, message);
+    } else if(cmd == "DELETE") {
+        bool status = store.erase(tokens[1]);
+
+        std::string message = status ? "1\n" : "0\n";
+
+        std::lock_guard<std::mutex> lock(state->mutex);
+
+        if(!state->active)
+            return;
+        sendResponse(client_fd, message);
+    } else if(cmd == "EXISTS") {
+        bool status = store.exists(tokens[1]);
+
+        std::string message = status ? "1\n" : "0\n";
+
+        std::lock_guard<std::mutex> lock(state->mutex);
+
+        if(!state->active)
+            return;
+        sendResponse(client_fd, message);
+    }
+}
+
+void Server::processNextCommand(int client_fd, std::shared_ptr<ClientState> state) {
+    std::string command;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if(state->processing || state->commands.empty() || !state->active)
+            return;
+
+        command = std::move(state->commands.front());
+        state->commands.pop_front();
+        state->processing = true;
+        pool.enqueue(
+            [this, client_fd, state, command]() {
+                processCommand(client_fd, command, state);
+
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    state->processing = false;
+                }
+                processNextCommand(client_fd, state);
+            }
+        );
+    }
 }
