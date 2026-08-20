@@ -5,7 +5,7 @@
 #include "CmdParser.h"
 
 int main() {
-    KVStore store;
+    KVStore store(3);
 
     Server server(PORT, store, NUM_THREADS);
     server.start();
